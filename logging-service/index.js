@@ -115,10 +115,13 @@ app.get('/', (req, res) => {
     body{font-family: Arial, Helvetica, sans-serif; background:#f7f9fc; color:#111}
     header{padding:16px; background:#2b6cb0; color:#fff}
     .container{max-width:1100px;margin:18px auto}
+    .container { align-items: start; }
     .event{background:#fff;border-radius:6px;padding:12px;margin:8px 0;box-shadow:0 1px 3px rgba(0,0,0,.06)}
     .meta{font-size:12px;color:#666}
     .topic{font-weight:700;color:#2b6cb0}
     #events{height:70vh;overflow:auto;padding:8px}
+    /* Right panel should not grow the page; limit height and add scrollbar */
+    #services{height:70vh;overflow:auto;padding:8px}
     .badge{display:inline-block;padding:2px 8px;border-radius:12px;background:#edf2ff;color:#2b6cb0;font-weight:600;margin-right:8px}
   </style>
 </head>
