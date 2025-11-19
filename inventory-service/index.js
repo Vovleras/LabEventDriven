@@ -4,117 +4,109 @@ const { Kafka } = require('kafkajs');
 const app = express();
 app.use(express.json());
 
-const kafka = new Kafka({
-  clientId: 'inventory-service',
-  brokers: [process.env.KAFKA_BROKER || 'localhost:9092']
-});
-
+const kafka = new Kafka({ clientId: 'inventory-service', brokers: [process.env.KAFKA_BROKER || 'kafka:29092'] });
 const producer = kafka.producer();
 const consumer = kafka.consumer({ groupId: 'inventory-group' });
 
-// Mock inventory
+// Simple in-memory inventory and reservations for demo
 const inventory = {
   'ITEM-001': { name: 'Laptop', stock: 50 },
   'ITEM-002': { name: 'Mouse', stock: 200 },
   'ITEM-003': { name: 'Keyboard', stock: 100 }
 };
+const reservations = Object.create(null);
 
-const connectKafka = async () => {
+async function connectKafka() {
+  const topicsToEnsure = ['order.created', 'product-events', 'inventory.updated'];
+
+  // Helper: ensure topics exist and have leaders before connecting producer/consumer
+  async function ensureTopics(topics, retries = 5, delayMs = 2000) {
+    const admin = kafka.admin();
+    for (let i = 0; i < retries; i++) {
+      try {
+        await admin.connect();
+        const created = await admin.createTopics({ topics: topics.map(t => ({ topic: t, numPartitions: 1 })), waitForLeaders: true });
+        await admin.disconnect();
+        console.log('Inventory Service: ensureTopics result=', created, 'topics=', topics);
+        return;
+      } catch (err) {
+        try { await admin.disconnect(); } catch (e) {}
+        console.warn(`Inventory Service: ensureTopics attempt ${i + 1} failed, retrying...`, err && err.message);
+        if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+    throw new Error('Inventory Service: failed to ensure Kafka topics after retries');
+  }
+
   try {
+    // Make best-effort to create / wait for topic leaders so clients don't see leader-election errors
+    try {
+      await ensureTopics(topicsToEnsure, 6, 2500);
+    } catch (err) {
+      console.warn('Inventory Service: ensureTopics failed, continuing to connect — broker may still be initializing', err && err.message);
+    }
+
     await producer.connect();
     await consumer.connect();
-    await consumer.subscribe({ topic: 'order-events', fromBeginning: false });
+
+    await consumer.subscribe({ topic: 'order.created', fromBeginning: false });
     await consumer.subscribe({ topic: 'product-events', fromBeginning: false });
-    
+
     console.log('Inventory Service: Kafka connected');
 
-    // Consume order events
     await consumer.run({
-      eachMessage: async ({ topic, partition, message }) => {
-        const event = JSON.parse(message.value.toString());
+      eachMessage: async ({ topic, message }) => {
+        let event = null;
+        try { event = JSON.parse(message.value.toString()); } catch (e) { console.error('Inventory: invalid message', e); return; }
 
-        if (topic==='order-events'){
-                    if (event.eventType === 'ORDER_CREATED') {
-          console.log(`Processing order: ${event.data.orderId}`);
-          
-          // Check inventory
-          const available = event.data.items.every(item => {
-            const stock = inventory[item.itemId];
-            return stock && stock.stock >= item.quantity;
+        if (topic === 'order.created' && event && event.eventType === 'ORDER_CREATED' && event.data) {
+          const orderId = event.data.orderId;
+          const items = Array.isArray(event.data.items) ? event.data.items : [];
+          const normalized = items.map(it => ({ itemId: it.itemId || it.productId, quantity: Number(it.quantity || it.qty || 0) }));
+
+          const available = normalized.every(it => {
+            const ent = inventory[it.itemId];
+            return ent && (Number(ent.stock) || 0) >= it.quantity;
           });
 
-          // Update inventory if available
+          const reserved = [];
           if (available) {
-            event.data.items.forEach(item => {
-              inventory[item.itemId].stock -= item.quantity;
+            normalized.forEach(it => {
+              inventory[it.itemId].stock -= it.quantity;
+              reserved.push({ itemId: it.itemId, quantity: it.quantity, remaining: inventory[it.itemId].stock });
             });
+            reservations[orderId] = { orderId, items: reserved, available: true, timestamp: new Date().toISOString() };
+          } else {
+            reservations[orderId] = { orderId, items: normalized, available: false, timestamp: new Date().toISOString() };
           }
 
-          // Publish inventory event
-          await producer.send({
-            topic: 'inventory-events',
-            messages: [{
-              key: event.data.orderId,
-              value: JSON.stringify({
-                eventType: available ? 'INVENTORY_RESERVED' : 'INVENTORY_INSUFFICIENT',
-                data: {
-                  orderId: event.data.orderId,
-                  available,
-                  timestamp: new Date().toISOString()
-                }
-              })
-            }]
-          });
+          try {
+            await producer.send({ topic: 'inventory.updated', messages: [{ key: orderId, value: JSON.stringify({ eventType: available ? 'INVENTORY_RESERVED' : 'INVENTORY_INSUFFICIENT', data: { orderId, available, reservedItems: reserved, timestamp: new Date().toISOString() } }) }] });
+            console.log('Inventory: published inventory.updated for', orderId);
+          } catch (e) { console.error('Inventory: publish failed', e); }
+        }
 
-          console.log(`Inventory ${available ? 'reserved' : 'insufficient'} for order: ${event.data.orderId}`);
+        if (topic === 'product-events' && event && event.eventType === 'PRODUCT_CREATED' && event.data) {
+          const p = event.data;
+          inventory[p.productId] = { name: p.name, stock: Number(p.quantity || p.qty || 0) };
+          console.log('Inventory: added product', p.productId);
         }
       }
-
-
-      else if(topic==='product-events'){
-
-        if (event.eventType==='PRODUCT_CREATED'){
-            const product=event.data
-            // read quantity from event data; fall back to 0 if not provided
-            const qty = (product && product.quantity) || event.quantity || 0
-            inventory[product.productId] = { name: product.name, stock: Number(qty) };
-
-            console.log('Inventory updated with new product:', product.productId, 'stock:', inventory[product.productId].stock);
-        }
-
-      }
-
-
-        }
-        
-
     });
-  } catch (error) {
-    console.error('Inventory Service: Kafka connection failed', error);
+  } catch (err) {
+    console.error('Inventory Service: Kafka connection error', err);
     setTimeout(connectKafka, 5000);
   }
-};
+}
 
 connectKafka();
 
-// Get inventory endpoint
-app.get('/inventory', (req, res) => {
-  res.json({ inventory });
-});
+app.get('/inventory', (req, res) => res.json({ inventory }));
+app.get('/reservations', (req, res) => res.json({ reservations }));
+app.get('/health', (req, res) => res.json({ status: 'healthy', service: 'inventory-service' }));
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', service: 'inventory-service' });
-});
+const PORT = Number(process.env.PORT || 3003);
+app.listen(PORT, () => console.log(`inventory-service listening on ${PORT}`));
 
-const PORT = 3003;
-app.listen(PORT, () => {
-  console.log(`Inventory Service running on port ${PORT}`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  await consumer.disconnect();
-  await producer.disconnect();
-  process.exit(0);
-});
+process.on('SIGTERM', async () => { try { await consumer.disconnect(); } catch {} try { await producer.disconnect(); } catch {} process.exit(0); });
+          

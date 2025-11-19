@@ -45,6 +45,13 @@ const connect = async () => {
         // Simulate sending SMS
         if (topic === 'order.completed' || topic === 'shipment.delivered') {
           console.log(`sms-service: send sms for ${topic} -> ${key}`);
+          try {
+            await producer.send({
+              topic: 'sms.sent',
+              messages: [{ key: key || undefined, value: JSON.stringify({ eventType: 'SMS_SENT', data: { topic, key, timestamp: new Date().toISOString() } }) }]
+            });
+            console.log('sms-service: published sms.sent', key);
+          } catch (e) { console.error('sms-service: publish error', e); }
         }
       }
     });

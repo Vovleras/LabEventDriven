@@ -45,6 +45,14 @@ const connect = async () => {
         // Simulate sending email
         if (topic === 'order.created' || topic === 'shipment.sent') {
           console.log(`email-service: send email for ${topic} -> ${key}`);
+          try {
+            // publish a small acknowledgement event so the logging UI knows this service reacted
+            await producer.send({
+              topic: 'email.sent',
+              messages: [{ key: key || undefined, value: JSON.stringify({ eventType: 'EMAIL_SENT', data: { topic, key, timestamp: new Date().toISOString() } }) }]
+            });
+            console.log('email-service: published email.sent', key);
+          } catch (e) { console.error('email-service: publish error', e); }
         }
       }
     });

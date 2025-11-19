@@ -12,27 +12,66 @@ const kafka = new Kafka({ clientId: SERVICE, brokers: [KAFKA_BROKER] });
 const consumer = kafka.consumer({ groupId: `${SERVICE}-group` });
 
 // Keep a bounded in-memory list of events for the demo UI
-const MAX_EVENTS = 1000;
+const MAX_EVENTS = 2000;
 const events = [];
+
+// index events by key (orderId or message key) to infer chains
+const keyIndex = Object.create(null);
 
 // SSE clients
 const sseClients = new Set();
 
-const topics = ['order.created','order.completed','payment.success','payment.failed','inventory.updated','shipment.sent','shipment.delivered','user.created','user.updated','product.created','product.updated'];
+// Map topics to the producing microservice (used to show per-service produced events)
+const topicToService = {
+  'user-events': 'user-service',
+  'product-events': 'product-service',
+  'inventory.updated': 'inventory-service',
+  'email.sent': 'email-service',
+  'sms.sent': 'sms-service',
+  'analytics.updated': 'analytics-service',
+  'order.created': 'order-service',
+  'order.completed': 'order-service',
+  'payment.success': 'payment-service',
+  'payment.failed': 'payment-service',
+  'shipment.sent': 'shipping-service',
+  'shipment.delivered': 'shipping-service'
+};
+
+// topics we subscribe to (derived from mapping)
+const topics = Object.keys(topicToService);
 
 const pushEvent = (evt) => {
-  // add to in-memory store
+  // enrich event with inferred producer and relations
+  evt.producedBy = topicToService[evt.topic] || 'unknown';
+  evt.reactsTo = []; // list of earlier events this one relates to
+  evt.reactedBy = []; // list of later events that reacted to this one
+
+  // find previous events with same key (if any) to infer relations
+  if (evt.key) {
+    const prev = keyIndex[evt.key] || [];
+    for (const p of prev) {
+      // record that this event reacts to the previous
+      evt.reactsTo.push({ topic: p.topic, producedBy: p.producedBy, timestamp: p.timestamp });
+      // and that the previous event was reacted by this event
+      p.reactedBy = p.reactedBy || [];
+      p.reactedBy.push({ topic: evt.topic, producedBy: evt.producedBy, timestamp: evt.timestamp });
+    }
+  }
+
+  // add to store and keyIndex
   events.push(evt);
+  if (evt.key) {
+    keyIndex[evt.key] = keyIndex[evt.key] || [];
+    keyIndex[evt.key].push(evt);
+  }
+
+  // trim
   if (events.length > MAX_EVENTS) events.shift();
 
   // push to SSE clients
   const data = `data: ${JSON.stringify(evt)}\n\n`;
   for (const res of sseClients) {
-    try {
-      res.write(data);
-    } catch (e) {
-      // ignore broken pipe, will be cleaned on close
-    }
+    try { res.write(data); } catch (e) {}
   }
 };
 
@@ -85,9 +124,15 @@ app.get('/', (req, res) => {
 </head>
 <body>
   <header><div class="container"><h2>Logging Service — Event Pipeline</h2></div></header>
-  <div class="container">
-    <p>Live stream of events. The page updates as events arrive.</p>
-    <div id="events"></div>
+  <div class="container" style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+    <div>
+      <p>Live stream of events. The page updates as events arrive.</p>
+      <div id="events"></div>
+    </div>
+    <div>
+      <p>Microservice view (produced / reacted / incoming)</p>
+      <div id="services"></div>
+    </div>
   </div>
   <script>
     const eventsEl = document.getElementById('events');
@@ -99,6 +144,8 @@ app.get('/', (req, res) => {
         el.className = 'event';
         el.innerHTML = '<div style="display:flex;justify-content:space-between"><div><span class="badge">' + d.topic + '</span><span class="meta">' + d.timestamp + '</span></div><div class="meta">Key: ' + (d.key || '-') + ' </div></div><pre style="white-space:pre-wrap;margin-top:8px">' + escapeHtml(d.value) + '</pre>';
         eventsEl.insertBefore(el, eventsEl.firstChild);
+        // also refresh services view (simple approach)
+        renderServices();
       } catch (err) { console.error('parse err', err); }
     };
     es.onerror = (err) => { console.error('EventSource error', err); };
@@ -111,8 +158,47 @@ app.get('/', (req, res) => {
         el.className = 'event';
         el.innerHTML = '<div style="display:flex;justify-content:space-between"><div><span class="badge">' + d.topic + '</span><span class="meta">' + d.timestamp + '</span></div><div class="meta">Key: ' + (d.key || '-') + ' </div></div><pre style="white-space:pre-wrap;margin-top:8px">' + escapeHtml(d.value) + '</pre>';
         eventsEl.appendChild(el);
-      })
+      });
+      renderServices();
     }).catch(()=>{});
+
+    const servicesEl = document.getElementById('services');
+    function renderServices(){
+      fetch('/services').then(r=>r.json()).then(payload=>{
+        servicesEl.innerHTML = '';
+        const svcNames = payload.services;
+        for (const s of svcNames){
+          const info = payload.data[s] || { produced: [], reacted: [], incoming: [] };
+          const panel = document.createElement('div');
+          panel.className = 'event';
+          panel.innerHTML = '<div style="display:flex;justify-content:space-between"><div style="font-weight:700">' + s + '</div><div class="meta">Produced: ' + info.produced.length + ' | Reacted: ' + info.reacted.length + ' | Incoming: ' + info.incoming.length + '</div></div>';
+          // produced list
+          const prodList = document.createElement('div');
+          prodList.style.marginTop = '8px';
+          info.produced.slice(-10).reverse().forEach(e=>{
+            const it = document.createElement('div');
+            it.className = 'meta';
+            it.innerHTML = '<span class="badge">' + e.topic + '</span> ' + e.timestamp + ' <small>key:' + (e.key||'-') + '</small>';
+            prodList.appendChild(it);
+          });
+          panel.appendChild(prodList);
+          // incoming samples
+          if (info.incoming && info.incoming.length){
+            const inc = document.createElement('div');
+            inc.style.marginTop = '8px';
+            inc.innerHTML = '<div style="font-weight:600;margin-bottom:4px">Reactions (incoming)</div>';
+            info.incoming.slice(-5).reverse().forEach(r=>{
+              const it = document.createElement('div');
+              it.className = 'meta';
+              it.innerHTML = '<span class="badge">' + r.topic + '</span> by <strong>' + (r.reactedBy||'-') + '</strong> at ' + r.timestamp + ' <small>key:' + (r.key||'-') + '</small>';
+              inc.appendChild(it);
+            });
+            panel.appendChild(inc);
+          }
+          servicesEl.appendChild(panel);
+        }
+      }).catch(()=>{});
+    }
   </script>
 </body>
 </html>
@@ -138,6 +224,40 @@ app.get('/stream', (req, res) => {
 // recent events JSON
 app.get('/events', (req, res) => {
   res.json(events.slice(-200));
+});
+
+// Services view: grouped events and inferred relations per microservice
+app.get('/services', (req, res) => {
+  // build a set of known services from mapping and observed events
+  const services = new Set(Object.values(topicToService));
+  // also include any producers observed in events
+  for (const e of events) if (e.producedBy) services.add(e.producedBy);
+  // include 'unknown' only if we've observed unknown-produced events
+  if (events.some(ev => ev.producedBy === 'unknown')) services.add('unknown');
+
+  const svcData = {};
+  for (const s of services) {
+    svcData[s] = { produced: [], reacted: [], incoming: [] };
+  }
+
+  // populate produced lists
+  for (const e of events) {
+    const svc = e.producedBy || 'unknown';
+    svcData[svc] = svcData[svc] || { produced: [], reacted: [], incoming: [] };
+    svcData[svc].produced.push(e);
+    if (e.reactsTo && e.reactsTo.length) svcData[svc].reacted.push(e);
+    // for each e.reactsTo entry, mark incoming for the original producer
+    if (e.reactsTo) {
+      for (const r of e.reactsTo) {
+        const origin = r.producedBy || 'unknown';
+        svcData[origin] = svcData[origin] || { produced: [], reacted: [], incoming: [] };
+        svcData[origin].incoming = svcData[origin].incoming || [];
+        svcData[origin].incoming.push({ reactedBy: e.producedBy, topic: e.topic, timestamp: e.timestamp, key: e.key });
+      }
+    }
+  }
+
+  res.json({ services: Object.keys(svcData).sort(), data: svcData });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'healthy', service: SERVICE }));

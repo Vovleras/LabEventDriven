@@ -10,6 +10,7 @@ app.use(express.json());
 
 const kafka = new Kafka({ clientId: SERVICE, brokers: [KAFKA_BROKER] });
 const consumer = kafka.consumer({ groupId: `${SERVICE}-group` });
+const producer = kafka.producer();
 
 const topics = ['order.completed','payment.success'];
 let counters = { ordersCompleted: 0, paymentsSuccess: 0 };
@@ -17,6 +18,7 @@ let counters = { ordersCompleted: 0, paymentsSuccess: 0 };
 const connect = async () => {
   try {
     await consumer.connect();
+    await producer.connect();
     console.log(`${SERVICE}: consumer connected`);
     for (const t of topics) {
       await consumer.subscribe({ topic: t, fromBeginning: false });
@@ -29,6 +31,13 @@ const connect = async () => {
         console.log(`${SERVICE}: received ${topic} - ${value}`);
         if (topic === 'order.completed') counters.ordersCompleted++;
         if (topic === 'payment.success') counters.paymentsSuccess++;
+        try {
+          // publish an analytics update event so UI knows analytics reacted
+          await producer.send({
+            topic: 'analytics.updated',
+            messages: [{ key: null, value: JSON.stringify({ eventType: 'ANALYTICS_UPDATE', data: { topic, counters: { ...counters }, timestamp: new Date().toISOString() } }) }]
+          });
+        } catch (e) { console.error('analytics-service: publish error', e); }
       }
     });
   } catch (err) { console.error(`${SERVICE}: kafka connect error`, err); setTimeout(connect, 5000); }
