@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: email-service-config
+  namespace: microservices
+data:
+  KAFKA_BROKER: "kafka:29092"
+  SERVICE_NAME: "email-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-service
+  namespace: microservices
+  labels:
+    app: email-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3007
+    targetPort: 3007
+    protocol: TCP
+    name: http
+  selector:
+    app: email-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-service
+  namespace: microservices
+  labels:
+    app: email-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: email-service
+  template:
+    metadata:
+      labels:
+        app: email-service
+    spec:
+      containers:
+      - name: email-service
+        image: email-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3007
+          name: http
+        envFrom:
+        - configMapRef:
+            name: email-service-config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3007
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3007
+          initialDelaySeconds: 10
+          periodSeconds: 5

@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: analytics-service-config
+  namespace: microservices
+data:
+  KAFKA_BROKER: "kafka:29092"
+  SERVICE_NAME: "analytics-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: microservices
+  labels:
+    app: analytics-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3010
+    targetPort: 3010
+    protocol: TCP
+    name: http
+  selector:
+    app: analytics-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: microservices
+  labels:
+    app: analytics-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-service
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+    spec:
+      containers:
+      - name: analytics-service
+        image: analytics-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3010
+          name: http
+        envFrom:
+        - configMapRef:
+            name: analytics-service-config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3010
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3010
+          initialDelaySeconds: 10
+          periodSeconds: 5

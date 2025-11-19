@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shipping-service-config
+  namespace: microservices
+data:
+  KAFKA_BROKER: "kafka:29092"
+  SERVICE_NAME: "shipping-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shipping-service
+  namespace: microservices
+  labels:
+    app: shipping-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3006
+    targetPort: 3006
+    protocol: TCP
+    name: http
+  selector:
+    app: shipping-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping-service
+  namespace: microservices
+  labels:
+    app: shipping-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shipping-service
+  template:
+    metadata:
+      labels:
+        app: shipping-service
+    spec:
+      containers:
+      - name: shipping-service
+        image: shipping-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3006
+          name: http
+        envFrom:
+        - configMapRef:
+            name: shipping-service-config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3006
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3006
+          initialDelaySeconds: 10
+          periodSeconds: 5
