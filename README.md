@@ -4,6 +4,38 @@
 
 - **Goal**: Show how services produce/consume Kafka topics and how to add more microservices into this infra.
 
+# Tests:
+
+- **order-service** -> **POST: http://localhost:3004/orders**:
+```
+{
+  "items": [
+    { "productId": "ITEM-001", "qty": 1 }
+  ]
+}  
+```
+- **user-service**->**POST:http://localhost:3001/users/**:
+```
+{
+  "name":"juan",
+  "email":"juan@gmail.com",
+  "adress":"fadsfsdafsdf",
+  "phone":12
+} 
+```
+- **product-service**->**POST:http://localhost:3002/products/**:
+```
+{
+  "name":"zapatos",
+  "price":"1000",
+  "description":"fddfasdfaf",
+  "quantity":20
+}
+```
+
+
+  
+
 **Repository Structure**
 
 - **`docker-compose.yml`**: Local composition of the full stack (Zookeeper, Kafka, a `kafka-init` helper that creates topics, and the example `user-service`). Used for local development and to create topics locally.
