@@ -34,3 +34,4 @@ docker images | grep product-service
 docker images | grep shipping-service
 docker images | grep analytics-service
 docker images | grep logging-service
+docker images | grep sms-service
